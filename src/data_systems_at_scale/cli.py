@@ -8,7 +8,8 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from data_systems_at_scale.pipelines.backfill import plan, run, stale_days
-from data_systems_at_scale.pipelines.jobs import daily_sales, week_of, weekly_sales
+from data_systems_at_scale.pipelines.deletes import copies, erase
+from data_systems_at_scale.pipelines.jobs import customer_sales, daily_sales, week_of, weekly_sales
 from data_systems_at_scale.pipelines.lineage import downstream
 from data_systems_at_scale.pipelines.raw import day_folder, days, late_arrivals, next_part, orders, read_day, write_part
 from data_systems_at_scale.pipelines.storage import fingerprint
@@ -54,6 +55,7 @@ def _daily(args: argparse.Namespace) -> None:
 def _weekly(args: argparse.Namespace) -> None:
     for week in sorted({week_of(day) for day in days(args.root)}):
         weekly_sales(args.root, week)
+        customer_sales(args.root, week)
 
 
 def _lineage(args: argparse.Namespace) -> None:
@@ -63,6 +65,19 @@ def _lineage(args: argparse.Namespace) -> None:
     for depth, path in tree:
         print("   " * (depth - 1) + ("└─ " if depth else "") + path)
     print(f"\n{len(tree) - len(starts)} outputs to fix")
+
+
+def _delete(args: argparse.Namespace) -> None:
+    before = copies(args.root, args.customer)
+    print(f"\n{args.customer} appears in {len(before)} files:")
+    print("".join(f"  {path.relative_to(args.root)}\n" for path in before), flush=True)  # before the log
+    erased = erase(args.root, args.customer)
+    print(f"\nerased {sum(erased.values())} orders from {len(erased)} raw files; rebuilding what they reached\n",
+          flush=True)
+    run(args.root, plan(args.root, stale_days(args.root)), parallel=2)
+    after = copies(args.root, args.customer)
+    print(f"\n{args.customer} now appears in {len(after)} files" + ("".join(f"\n  {p.relative_to(args.root)}"
+                                                                         for p in after) if after else ""))
 
 
 def _late(args: argparse.Namespace) -> None:
@@ -110,7 +125,7 @@ def main() -> None:
                        help="a day to run, repeatable (default: every raw day)")
     daily.add_argument("--crash-midway", action="store_true", help="crash halfway through writing the output")
     daily.set_defaults(run=_daily)
-    weekly = concepts.add_parser("weekly", parents=[lake], help="weekly sales per store, from the daily outputs")
+    weekly = concepts.add_parser("weekly", parents=[lake], help="weekly sales per store, and per customer")
     weekly.set_defaults(run=_weekly)
     lineage = concepts.add_parser("lineage", parents=[lake], help="every output a bad raw day reached")
     lineage.add_argument("--bad-day", type=date.fromisoformat, required=True, help="the raw day that was wrong")
@@ -133,6 +148,9 @@ def main() -> None:
                       help="existing orders with a new amount (default 3)")
     late.add_argument("--seed", type=int, default=0, help="the same seed gives the same arrivals (default 0)")
     late.set_defaults(run=_late)
+    delete = concepts.add_parser("delete", parents=[lake], help="delete one customer from raw data and every output")
+    delete.add_argument("--customer", required=True, help="the customer's id, such as c-17")
+    delete.set_defaults(run=_delete)
     args = parser.parse_args()
     if args.concept is None:
         parser.print_help()
