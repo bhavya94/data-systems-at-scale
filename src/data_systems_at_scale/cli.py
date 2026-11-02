@@ -9,6 +9,7 @@ from pathlib import Path
 
 from data_systems_at_scale.pipelines.backfill import plan, run, stale_days
 from data_systems_at_scale.pipelines.deletes import copies, erase
+from data_systems_at_scale.pipelines.versions import live, stage, swap, verify
 from data_systems_at_scale.pipelines.jobs import customer_sales, daily_sales, week_of, weekly_sales
 from data_systems_at_scale.pipelines.lineage import downstream
 from data_systems_at_scale.pipelines.raw import day_folder, days, late_arrivals, next_part, orders, read_day, write_part
@@ -80,6 +81,28 @@ def _delete(args: argparse.Namespace) -> None:
                                                                          for p in after) if after else ""))
 
 
+def _staged(args: argparse.Namespace, bad: list[date]) -> None:
+    staging, version = stage(args.root)
+    steps = plan(staging, bad)
+    run(staging, steps, args.parallel, args.step_ms)
+    if args.inject_bug:  # a bug in the rebuild: one staged output is off by one cent
+        path = staging / "out" / steps[0].job / steps[0].partition / "data.jsonl"
+        row = json.loads(path.read_text().splitlines()[0])
+        path.write_text(path.read_text().replace(json.dumps(row, sort_keys=True), json.dumps(
+            dict(row, amount_cents=row["amount_cents"] + 1), sort_keys=True), 1))
+    problems = verify(args.root, staging, steps)
+    if problems:
+        print(f"\nnot swapped. Failed checks: {len(problems)}")
+        print("".join(f"  {problem}\n" for problem in problems), end="")
+        print(f"out still points to {live(args.root).name}; {version} stays in {staging.name} to inspect")
+        return
+    swap(args.root, version)
+    for link in ("raw", "out"):
+        (staging / link).unlink()
+    staging.rmdir()
+    print(f"\nall checks passed; out now points to {version}. To go back, point it at the previous version.")
+
+
 def _late(args: argparse.Namespace) -> None:
     rows = late_arrivals(args.root, args.day, args.late, args.corrections, args.seed)
     path = write_part(args.root, args.day, rows, part=next_part(args.root, args.day))
@@ -93,7 +116,10 @@ def _backfill(args: argparse.Namespace) -> None:
     if not bad:
         print("\nnothing to backfill: every output read the raw files as they are now")
         return
-    print(f"\ndays to backfill: {', '.join(day.isoformat() for day in bad)}")
+    print(f"\ndays to backfill: {', '.join(day.isoformat() for day in bad)}", flush=True)
+    if args.staged:
+        _staged(args, bad)
+        return
     steps = plan(args.root, bad)
     print(f"\n{'level':>5}  {'job':<13} {'partition':<16} {'rows read':>9}")
     for step in steps:
@@ -140,6 +166,10 @@ def main() -> None:
     backfill.add_argument("--parallel", type=_at_least(1), default=2, help="most steps at once (default 2)")
     backfill.add_argument("--step-ms", type=_at_least(0), default=0,
                           help="make each step take this much longer, to watch the throttle (default 0)")
+    backfill.add_argument("--staged", action="store_true",
+                          help="rebuild into a new version, verify it, then swap it live")
+    backfill.add_argument("--inject-bug", action="store_true",
+                          help="with --staged: make one staged output off by a cent, to see the checks stop the swap")
     backfill.set_defaults(run=_backfill)
     late = concepts.add_parser("late", parents=[lake], help="late and corrected orders arrive for an old day")
     late.add_argument("--day", type=date.fromisoformat, required=True, help="the day they belong to")

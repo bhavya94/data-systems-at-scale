@@ -62,7 +62,7 @@ def inputs(root: Path, job: str, partition: str) -> list[Path]:
                   for path in day_folder(root, day).glob("part-*.jsonl"))
 
 
-def _latest(paths: list[Path]) -> tuple[list[dict], int]:
+def latest_orders(paths: list[Path]) -> tuple[list[dict], int]:
     """The latest version of each order in the files, and how many orders the files held in all. A correction
     carries an order's id with a higher `version`."""
     orders = [json.loads(line) for path in paths for line in path.read_text().splitlines()]
@@ -91,7 +91,7 @@ def daily_sales(root: Path, day: date, crash_midway: bool = False) -> Path:
     """Orders and amount per store on `day`, from that day's raw orders. Only the latest version of each order
     counts."""
     files = inputs(root, "daily_sales", f"date={day.isoformat()}")
-    latest, read = _latest(files)
+    latest, read = latest_orders(files)
     path = out_path(root, "daily_sales", f"date={day.isoformat()}")
     log.info("daily_sales %s: read %d raw orders; output was %s", day, read, fingerprint(path) or "missing")
     if read > len(latest):
@@ -115,7 +115,7 @@ def customer_sales(root: Path, week: str) -> Path:
     """Orders and amount per customer in one ISO week, from raw orders. It keeps each customer's id: a copy of
     personal data, which a delete must reach."""
     files = inputs(root, "customer_sales", f"week={week}")
-    latest, _ = _latest(files)
+    latest, _ = latest_orders(files)
     path = out_path(root, "customer_sales", f"week={week}")
     log.info("customer_sales %s: %d orders from %d raw files", week, len(latest), len(files))
     return _replace(root, path, _lines({"week": week}, _add_up(latest, "customer", None), "customer"),
