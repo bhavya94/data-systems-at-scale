@@ -26,25 +26,39 @@ def out_path(root: Path, table: str, partition: str) -> Path:
     return root / "out" / table / partition / "data.jsonl"
 
 
+def _replace(root: Path, path: Path, lines: list[str], job: str, inputs: list[Path], label: str,
+             crash_midway: bool = False) -> Path:
+    """Write a job's output in one step, record its lineage, and log whether the bytes changed."""
+    before = fingerprint(path)
+    write_atomic(path, "".join(lines), crash_midway)
+    record(root, path, job, inputs)
+    after = fingerprint(path)
+    log.info("%s %s: output is %s, %s", job, label, after,
+             "the same bytes as before" if after == before else "new" if before is None else "changed")
+    return path
+
+
 def daily_sales(root: Path, day: date, crash_midway: bool = False) -> Path:
-    """Orders and amount per store on `day`, from that day's raw orders."""
+    """Orders and amount per store on `day`, from that day's raw orders. A correction carries an order's id with a
+    higher `version`; only the latest version of each order counts."""
     orders = read_day(root, day)
+    latest: dict[str, dict] = {}
+    for order in sorted(orders, key=lambda order: order.get("version", 1)):  # a later version replaces an earlier
+        latest[order["order_id"]] = order
     totals: dict[str, dict[str, int]] = {}
-    for order in orders:
+    for order in latest.values():
         store = totals.setdefault(order["store"], {"orders": 0, "amount_cents": 0})
         store["orders"] += 1
         store["amount_cents"] += order["amount_cents"]
     lines = [json.dumps({"date": day.isoformat(), "store": name, **totals[name]}, sort_keys=True) + "\n"
              for name in sorted(totals)]  # by store name, whatever order the orders arrive in
     path = out_path(root, "daily_sales", f"date={day.isoformat()}")
-    before = fingerprint(path)
-    log.info("daily_sales %s: read %d raw orders; output was %s", day, len(orders), before or "missing")
-    write_atomic(path, "".join(lines), crash_midway)
-    record(root, path, "daily_sales", sorted(day_folder(root, day).glob("part-*.jsonl")))
-    after = fingerprint(path)
-    log.info("daily_sales %s: output is %s, %s", day, after,
-             "the same bytes as before" if after == before else "new" if before is None else "changed")
-    return path
+    log.info("daily_sales %s: read %d raw orders; output was %s", day, len(orders), fingerprint(path) or "missing")
+    if len(orders) > len(latest):
+        log.info("daily_sales %s: %d of them correct earlier orders; the latest version of each counts",
+                 day, len(orders) - len(latest))
+    return _replace(root, path, lines, "daily_sales", sorted(day_folder(root, day).glob("part-*.jsonl")),
+                    day.isoformat(), crash_midway)
 
 
 def week_of(day: date) -> str:
@@ -66,6 +80,4 @@ def weekly_sales(root: Path, week: str) -> Path:
              for name in sorted(totals)]
     path = out_path(root, "weekly_sales", f"week={week}")
     log.info("weekly_sales %s: adding up %d daily outputs", week, len(dailies))
-    write_atomic(path, "".join(lines))
-    record(root, path, "weekly_sales", dailies)
-    return path
+    return _replace(root, path, lines, "weekly_sales", dailies, week)

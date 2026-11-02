@@ -171,13 +171,70 @@ rebuilt 5 outputs in 629 ms; at most 2 ran at once (limit 2)
 - The weekly steps start only once level 1 is done, so they read the rebuilt days.
 - A lock guards the count of running steps, because every backfill thread updates it.
 
+## Late and corrected orders
+
+Orders for an old day can arrive after its file was written: late orders, and corrections of earlier ones. `dsas
+late` drops them into the day's folder as a new file. A correction repeats an order's id, with a new amount and
+the next `version`.
+
+```console
+$ uv run dsas late --day 2026-10-03
+    9.5ms  MainThread  wrote raw/orders/date=2026-10-03/part-1.jsonl: 8 orders
+
+raw/orders/date=2026-10-03/part-1.jsonl: 5 late orders, 3 corrections
+{"amount_cents": 1340, "customer": "c-26", "event_time": "2026-10-03T02:35:54Z", "order_id": "1003-L0004", "store": "s-3"}
+{"amount_cents": 1205, "customer": "c-30", "event_time": "2026-10-03T03:21:26Z", "order_id": "1003-L0003", "store": "s-1"}
+{"amount_cents": 1604, "customer": "c-04", "event_time": "2026-10-03T03:28:11Z", "order_id": "1003-L0002", "store": "s-3"}
+{"amount_cents": 11028, "customer": "c-17", "event_time": "2026-10-03T13:19:11Z", "order_id": "1003-L0000", "store": "s-3"}
+{"amount_cents": 15785, "customer": "c-38", "event_time": "2026-10-03T15:28:35Z", "order_id": "1003-L0001", "store": "s-3"}
+{"amount_cents": 583, "customer": "c-37", "event_time": "2026-10-03T05:00:59Z", "order_id": "1003-0020", "store": "s-2", "version": 2}
+{"amount_cents": 5087, "customer": "c-24", "event_time": "2026-10-03T03:54:52Z", "order_id": "1003-0128", "store": "s-3", "version": 2}
+{"amount_cents": 5244, "customer": "c-35", "event_time": "2026-10-03T21:44:04Z", "order_id": "1003-0124", "store": "s-1", "version": 2}
+```
+
+`dsas backfill --stale` finds the days whose raw files changed since their daily output read them. It compares
+the fingerprints in each `_lineage.json` with the files as they are now. Then it rebuilds those days and the
+weeks they feed.
+
+```console
+$ uv run dsas backfill --stale 2>&1 | grep -vE "wrote [0-9]+ bytes|lineage:|rebuilding|adding up"
+    9.2ms  MainThread  stale: out/daily_sales/date=2026-10-03/data.jsonl: the folder now holds 2 raw files, and it read 1
+
+days to backfill: 2026-10-03
+
+level  job           partition        rows read
+    1  daily_sales   date=2026-10-03        208
+    2  weekly_sales  week=2026-W40           12
+2 steps, 220 rows to read
+
+   11.3ms  backfill_0  daily_sales 2026-10-03: read 208 raw orders; output was c3b772c8e6c6
+   11.3ms  backfill_0  daily_sales 2026-10-03: 3 of them correct earlier orders; the latest version of each counts
+   12.1ms  backfill_0  daily_sales 2026-10-03: output is a86eb8f79d1a, changed
+   12.2ms  MainThread  level 1 done: rebuilt 1, so the next level can read them
+   13.2ms  backfill_0  weekly_sales 2026-W40: output is b4992bb91d7f, changed
+   13.3ms  MainThread  level 2 done: rebuilt 1, so the next level can read them
+
+rebuilt 2 outputs in 3 ms; at most 1 ran at once (limit 2)
+
+$ uv run dsas backfill --stale
+
+nothing to backfill: every output read the raw files as they are now
+```
+
+- Only 2026-10-03 is stale. The other days' files match what their outputs read, so they aren't touched.
+- The day now reads 208 raw orders, and 3 of them correct earlier ones. Only the latest version of each order
+  counts, so a correction replaces the old amount instead of adding to it. An old version that arrives again
+  later doesn't undo a correction.
+- The plan's cost counts the late file too: 208 rows, not the 200 the old output read.
+- Run it again, and nothing is stale.
+
 ## Layout
 
 ```
 src/data_systems_at_scale/
-  cli.py        the dsas command: raw, daily, weekly, lineage and backfill
+  cli.py        the dsas command: raw, daily, weekly, lineage, backfill and late
   pipelines/    jobs that turn raw data into outputs, and how to fix the outputs
-    raw.py      seeded raw orders, one folder per day, written once
+    raw.py      seeded raw orders, one folder per day, written once; late arrivals
     jobs.py     daily and weekly sales per store
     lineage.py  each output's inputs; everything a bad input reached
     backfill.py plan and run a rebuild: scope, order, cost and throttle

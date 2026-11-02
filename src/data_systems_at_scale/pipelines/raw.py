@@ -58,3 +58,18 @@ def read_day(root: Path, day: date) -> list[dict]:
 def days(root: Path) -> list[date]:
     """Every day that has a raw folder, in order."""
     return sorted(date.fromisoformat(p.name.removeprefix("date=")) for p in (root / "raw" / "orders").glob("date=*"))
+
+
+def late_arrivals(root: Path, day: date, late: int, corrections: int, seed: int) -> list[dict]:
+    """Orders for `day` that arrive after its first file: `late` new orders, and `corrections` of existing ones. A
+    correction repeats an order's id with a new amount and the next `version`."""
+    rng = random.Random(f"late-{seed}-{day.isoformat()}")
+    new = [dict(order, order_id=order["order_id"].replace("-", "-L", 1)) for order in orders(day, late, seed + 1)]
+    existing = read_day(root, day)
+    fixed = [dict(order, amount_cents=rng.randrange(500, 20_000), version=order.get("version", 1) + 1)
+             for order in rng.sample(existing, min(corrections, len(existing)))]
+    return new + fixed
+
+
+def next_part(root: Path, day: date) -> int:
+    return len(list(day_folder(root, day).glob("part-*.jsonl")))
