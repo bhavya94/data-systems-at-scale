@@ -5,7 +5,9 @@ import logging
 from datetime import date, timedelta
 from pathlib import Path
 
-from data_systems_at_scale.pipelines.raw import orders, read_day, write_part
+from data_systems_at_scale.pipelines.jobs import daily_sales
+from data_systems_at_scale.pipelines.raw import days, orders, read_day, write_part
+from data_systems_at_scale.pipelines.storage import fingerprint
 
 # Each log line starts with the ms since the program started, then the thread that wrote it.
 LOG_FORMAT = "%(relativeCreated)7.1fms  %(threadName)-10s  %(message)s"
@@ -32,6 +34,19 @@ def _raw(args: argparse.Namespace) -> None:
         print(f"{day.isoformat():<12} {len(rows):>6} {sum(r['amount_cents'] for r in rows) / 100:>12,.2f}")
 
 
+def _daily(args: argparse.Namespace) -> None:
+    for day in args.day or days(args.root):
+        try:
+            path = daily_sales(args.root, day, args.crash_midway)
+        except RuntimeError as crash:
+            path = args.root / "out" / "daily_sales" / f"date={day.isoformat()}" / "data.jsonl"
+            print(f"\n{crash}. The output is still {fingerprint(path) or 'missing'}, whole; "
+                  f"{path.name}.tmp is left behind, and nothing reads it.")
+            return
+    print(f"\n{path.relative_to(args.root)}:")
+    print(path.read_text(), end="")
+
+
 def main() -> None:
     lake = argparse.ArgumentParser(add_help=False)  # every concept reads and writes the same lake
     lake.add_argument("--root", type=Path, default=Path("lake"), help="where the data lives (default lake)")
@@ -44,6 +59,11 @@ def main() -> None:
     raw.add_argument("--rows", type=_at_least(1), default=200, help="orders per day (default 200)")
     raw.add_argument("--seed", type=int, default=0, help="the same seed gives the same orders (default 0)")
     raw.set_defaults(run=_raw)
+    daily = concepts.add_parser("daily", parents=[lake], help="daily sales per store; safe to rerun")
+    daily.add_argument("--day", type=date.fromisoformat, action="append",
+                       help="a day to run, repeatable (default: every raw day)")
+    daily.add_argument("--crash-midway", action="store_true", help="crash halfway through writing the output")
+    daily.set_defaults(run=_daily)
     args = parser.parse_args()
     if args.concept is None:
         parser.print_help()
