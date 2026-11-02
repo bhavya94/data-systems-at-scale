@@ -85,14 +85,57 @@ $ wc -c lake/out/daily_sales/date=2026-10-01/data.jsonl*
 
 - The output keeps all its bytes. Only the temp file is half-written, and the next run replaces it.
 
+## Lineage: trace a bad day to everything it reached
+
+Every job now records its inputs beside its output, in `_lineage.json`. A second job, `dsas weekly`, adds up
+the daily outputs of each ISO week. So a raw day feeds a daily output, which feeds a weekly one.
+
+```console
+$ uv run dsas raw >/dev/null 2>&1; uv run dsas daily >/dev/null 2>&1
+$ uv run dsas weekly 2>&1 | grep "lineage:"
+   14.4ms  MainThread  lineage: out/weekly_sales/week=2026-W40/data.jsonl read 4 inputs: out/daily_sales/date=2026-10-01/data.jsonl, out/daily_sales/date=2026-10-02/data.jsonl, out/daily_sales/date=2026-10-03/data.jsonl, out/daily_sales/date=2026-10-04/data.jsonl
+   22.5ms  MainThread  lineage: out/weekly_sales/week=2026-W41/data.jsonl read 3 inputs: out/daily_sales/date=2026-10-05/data.jsonl, out/daily_sales/date=2026-10-06/data.jsonl, out/daily_sales/date=2026-10-07/data.jsonl
+
+$ head -9 lake/out/weekly_sales/week=2026-W40/_lineage.json
+{
+ "inputs": [
+  {
+   "fingerprint": "a3db0c49931f",
+   "path": "out/daily_sales/date=2026-10-01/data.jsonl"
+  },
+  {
+   "fingerprint": "71292aa02f9e",
+   "path": "out/daily_sales/date=2026-10-02/data.jsonl"
+```
+
+Say the raw orders for 2026-10-03 turn out to be wrong. Lineage answers: which outputs did they reach?
+
+```console
+$ uv run dsas lineage --bad-day 2026-10-03
+
+everything 2026-10-03 reached:
+raw/orders/date=2026-10-03/part-0.jsonl
+└─ out/daily_sales/date=2026-10-03/data.jsonl
+   └─ out/weekly_sales/week=2026-W40/data.jsonl
+
+2 outputs to fix
+```
+
+- `downstream` reads every `_lineage.json`, finds the outputs that read the bad file, then the outputs that read
+  those, and so on.
+- 2026-10-03 reached its own daily output and week 40, and nothing else. Only those two need fixing.
+- Each input's fingerprint shows exactly which version of it the output read. A later step uses that to find
+  outputs whose inputs changed.
+
 ## Layout
 
 ```
 src/data_systems_at_scale/
-  cli.py        the dsas command: raw and daily
+  cli.py        the dsas command: raw, daily, weekly and lineage
   pipelines/    jobs that turn raw data into outputs, and how to fix the outputs
     raw.py      seeded raw orders, one folder per day, written once
-    jobs.py     daily sales per store, from one day's raw orders
+    jobs.py     daily and weekly sales per store
+    lineage.py  each output's inputs; everything a bad input reached
     storage.py  write a temp file, then rename it over the output
 tests/          one behavior test per concept
 ```
