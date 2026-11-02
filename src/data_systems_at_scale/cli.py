@@ -2,9 +2,11 @@
 
 import argparse
 import logging
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
+from data_systems_at_scale.pipelines.backfill import plan, run
 from data_systems_at_scale.pipelines.jobs import daily_sales, week_of, weekly_sales
 from data_systems_at_scale.pipelines.lineage import downstream
 from data_systems_at_scale.pipelines.raw import day_folder, days, orders, read_day, write_part
@@ -62,6 +64,21 @@ def _lineage(args: argparse.Namespace) -> None:
     print(f"\n{len(tree) - len(starts)} outputs to fix")
 
 
+def _backfill(args: argparse.Namespace) -> None:
+    steps = plan(args.root, args.bad_day)
+    print(f"\n{'level':>5}  {'job':<13} {'partition':<16} {'rows read':>9}")
+    for step in steps:
+        print(f"{step.level:>5}  {step.job:<13} {step.partition:<16} {step.reads:>9}")
+    print(f"{len(steps)} steps, {sum(step.reads for step in steps)} rows to read\n", flush=True)  # before the log
+    if args.dry_run:
+        print("dry run: nothing rebuilt")
+        return
+    start = time.time()
+    done, peak = run(args.root, steps, args.parallel, args.step_ms)
+    print(f"\nrebuilt {len(done)} outputs in {(time.time() - start) * 1000:.0f} ms; "
+          f"at most {peak} ran at once (limit {args.parallel})")
+
+
 def main() -> None:
     lake = argparse.ArgumentParser(add_help=False)  # every concept reads and writes the same lake
     lake.add_argument("--root", type=Path, default=Path("lake"), help="where the data lives (default lake)")
@@ -84,6 +101,14 @@ def main() -> None:
     lineage = concepts.add_parser("lineage", parents=[lake], help="every output a bad raw day reached")
     lineage.add_argument("--bad-day", type=date.fromisoformat, required=True, help="the raw day that was wrong")
     lineage.set_defaults(run=_lineage)
+    backfill = concepts.add_parser("backfill", parents=[lake], help="plan and run the rebuild of bad days' outputs")
+    backfill.add_argument("--bad-day", type=date.fromisoformat, action="append", required=True,
+                          help="a raw day that was wrong, repeatable")
+    backfill.add_argument("--dry-run", action="store_true", help="show the plan and its cost, rebuild nothing")
+    backfill.add_argument("--parallel", type=_at_least(1), default=2, help="most steps at once (default 2)")
+    backfill.add_argument("--step-ms", type=_at_least(0), default=0,
+                          help="make each step take this much longer, to watch the throttle (default 0)")
+    backfill.set_defaults(run=_backfill)
     args = parser.parse_args()
     if args.concept is None:
         parser.print_help()
