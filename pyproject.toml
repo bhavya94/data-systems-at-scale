@@ -1,0 +1,18 @@
+[project]
+name = "data-systems-at-scale"
+version = "0.1.0"
+description = "Data pipelines and distributed processing, built up one concept per pull request, each one runnable."
+readme = "README.md"
+authors = [{ name = "Bhavya Sharma" }]
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+dsas = "data_systems_at_scale.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=9.1.1"]
