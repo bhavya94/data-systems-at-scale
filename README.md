@@ -127,15 +127,60 @@ raw/orders/date=2026-10-03/part-0.jsonl
 - Each input's fingerprint shows exactly which version of it the output read. A later step uses that to find
   outputs whose inputs changed.
 
+## Backfill: scope, order, cost and throttle
+
+Say three raw days were wrong. `dsas backfill` plans the rebuild of everything they reached, shows the cost,
+and runs it a few steps at a time.
+
+```console
+$ uv run dsas backfill --bad-day 2026-10-02 --bad-day 2026-10-03 --bad-day 2026-10-05 --dry-run
+
+level  job           partition        rows read
+    1  daily_sales   date=2026-10-02        200
+    1  daily_sales   date=2026-10-03        200
+    1  daily_sales   date=2026-10-05        200
+    2  weekly_sales  week=2026-W40           12
+    2  weekly_sales  week=2026-W41            9
+5 steps, 621 rows to read
+
+dry run: nothing rebuilt
+```
+
+- Scope: lineage finds the daily output of each bad day, and the weeks those days feed. Weeks 40 and 41 each
+  appear once, though week 40 holds two bad days.
+- Order: a weekly output reads daily outputs, so every daily step is level 1 and runs before any level 2 step.
+- Cost: each step shows the rows it reads. `--dry-run` stops here, so you see the bill before you pay it.
+
+Then the run, with at most 2 steps at once. `--step-ms 200` makes each step take 200 ms longer, as a day of real
+data would, so you can watch the throttle:
+
+```console
+$ uv run dsas backfill --bad-day 2026-10-02 --bad-day 2026-10-03 --bad-day 2026-10-05 --step-ms 200 2>&1 \
+    | grep -E "rebuilding|done:|rebuilt|at most"
+   11.2ms  backfill_0  rebuilding daily_sales date=2026-10-02 (1 running, limit 2)
+   11.3ms  backfill_1  rebuilding daily_sales date=2026-10-03 (2 running, limit 2)
+  221.3ms  backfill_1  rebuilding daily_sales date=2026-10-05 (2 running, limit 2)
+  430.4ms  MainThread  level 1 done: rebuilt 3, so the next level can read them
+  430.7ms  backfill_0  rebuilding weekly_sales week=2026-W40 (1 running, limit 2)
+  430.8ms  backfill_1  rebuilding weekly_sales week=2026-W41 (2 running, limit 2)
+  640.3ms  MainThread  level 2 done: rebuilt 2, so the next level can read them
+rebuilt 5 outputs in 629 ms; at most 2 ran at once (limit 2)
+```
+
+- `backfill_0` and `backfill_1` take the first two days. The third day starts only when one of them finishes.
+- The weekly steps start only once level 1 is done, so they read the rebuilt days.
+- A lock guards the count of running steps, because every backfill thread updates it.
+
 ## Layout
 
 ```
 src/data_systems_at_scale/
-  cli.py        the dsas command: raw, daily, weekly and lineage
+  cli.py        the dsas command: raw, daily, weekly, lineage and backfill
   pipelines/    jobs that turn raw data into outputs, and how to fix the outputs
     raw.py      seeded raw orders, one folder per day, written once
     jobs.py     daily and weekly sales per store
     lineage.py  each output's inputs; everything a bad input reached
+    backfill.py plan and run a rebuild: scope, order, cost and throttle
     storage.py  write a temp file, then rename it over the output
 tests/          one behavior test per concept
 ```
