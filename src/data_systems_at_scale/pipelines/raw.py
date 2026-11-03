@@ -53,3 +53,8 @@ def read_day(root: Path, day: date) -> list[dict]:
     """Every order in the day's folder, from every part file, in part order."""
     return [json.loads(line) for path in sorted(day_folder(root, day).glob("part-*.jsonl"))
             for line in path.read_text().splitlines()]
+
+
+def days(root: Path) -> list[date]:
+    """Every day that has a raw folder, in order."""
+    return sorted(date.fromisoformat(p.name.removeprefix("date=")) for p in (root / "raw" / "orders").glob("date=*"))

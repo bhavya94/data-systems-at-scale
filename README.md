@@ -44,12 +44,55 @@ day          orders       amount
 - Data that arrives later, such as a late order or a correction, lands as a new file in its day's folder,
   `part-1.jsonl` and up. So a job can always be rerun on exactly the input it read before.
 
+## A job you can rerun safely
+
+`dsas daily` reads one day's raw orders and writes that day's orders and amount per store. Run it, then run it
+again:
+
+```console
+$ uv run dsas daily --day 2026-10-01
+    7.3ms  MainThread  daily_sales 2026-10-01: read 200 raw orders; output was missing
+    7.7ms  MainThread  wrote 231 bytes to data.jsonl.tmp; renaming it over data.jsonl in one step
+    8.0ms  MainThread  daily_sales 2026-10-01: output is a3db0c49931f, new
+
+out/daily_sales/date=2026-10-01/data.jsonl:
+{"amount_cents": 625870, "date": "2026-10-01", "orders": 68, "store": "s-1"}
+{"amount_cents": 767533, "date": "2026-10-01", "orders": 72, "store": "s-2"}
+{"amount_cents": 623324, "date": "2026-10-01", "orders": 60, "store": "s-3"}
+
+$ uv run dsas daily --day 2026-10-01 2>&1 | grep "output is"
+    9.1ms  MainThread  daily_sales 2026-10-01: output is a3db0c49931f, the same bytes as before
+```
+
+- The job replaces its whole output for the day, and it reads only raw input, which never changes. So a rerun
+  gives the same bytes: the fingerprint, the start of the file's SHA-256, stays `a3db0c49931f`.
+- It never writes into the output itself. It writes a temp file beside it, then renames the temp file over the
+  output with `os.replace`. A rename is one step: a reader sees the old file or the new one, never half of each.
+
+`--crash-midway` stops halfway through writing the temp file, as a crash would:
+
+```console
+$ uv run dsas daily --day 2026-10-01 --crash-midway
+    7.4ms  MainThread  daily_sales 2026-10-01: read 200 raw orders; output was a3db0c49931f
+
+simulated crash after writing half of data.jsonl.tmp. The output is still a3db0c49931f, whole; data.jsonl.tmp is left behind, and nothing reads it.
+
+$ wc -c lake/out/daily_sales/date=2026-10-01/data.jsonl*
+     231 out/daily_sales/date=2026-10-01/data.jsonl
+     115 out/daily_sales/date=2026-10-01/data.jsonl.tmp
+     346 total
+```
+
+- The output keeps all its bytes. Only the temp file is half-written, and the next run replaces it.
+
 ## Layout
 
 ```
 src/data_systems_at_scale/
-  cli.py        the dsas command; each concept adds a subcommand
+  cli.py        the dsas command: raw and daily
   pipelines/    jobs that turn raw data into outputs, and how to fix the outputs
     raw.py      seeded raw orders, one folder per day, written once
+    jobs.py     daily sales per store, from one day's raw orders
+    storage.py  write a temp file, then rename it over the output
 tests/          one behavior test per concept
 ```
