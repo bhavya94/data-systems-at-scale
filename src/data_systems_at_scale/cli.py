@@ -1,15 +1,16 @@
 """`dsas`: the one command. Each concept the repo adds becomes a subcommand here."""
 
 import argparse
+import json
 import logging
 import time
 from datetime import date, timedelta
 from pathlib import Path
 
-from data_systems_at_scale.pipelines.backfill import plan, run
+from data_systems_at_scale.pipelines.backfill import plan, run, stale_days
 from data_systems_at_scale.pipelines.jobs import daily_sales, week_of, weekly_sales
 from data_systems_at_scale.pipelines.lineage import downstream
-from data_systems_at_scale.pipelines.raw import day_folder, days, orders, read_day, write_part
+from data_systems_at_scale.pipelines.raw import day_folder, days, late_arrivals, next_part, orders, read_day, write_part
 from data_systems_at_scale.pipelines.storage import fingerprint
 
 # Each log line starts with the ms since the program started, then the thread that wrote it.
@@ -64,8 +65,21 @@ def _lineage(args: argparse.Namespace) -> None:
     print(f"\n{len(tree) - len(starts)} outputs to fix")
 
 
+def _late(args: argparse.Namespace) -> None:
+    rows = late_arrivals(args.root, args.day, args.late, args.corrections, args.seed)
+    path = write_part(args.root, args.day, rows, part=next_part(args.root, args.day))
+    print(f"\n{path.relative_to(args.root)}: {args.late} late orders, {args.corrections} corrections")
+    for row in rows:
+        print(json.dumps(row, sort_keys=True))
+
+
 def _backfill(args: argparse.Namespace) -> None:
-    steps = plan(args.root, args.bad_day)
+    bad = stale_days(args.root) if args.stale else args.bad_day
+    if not bad:
+        print("\nnothing to backfill: every output read the raw files as they are now")
+        return
+    print(f"\ndays to backfill: {', '.join(day.isoformat() for day in bad)}")
+    steps = plan(args.root, bad)
     print(f"\n{'level':>5}  {'job':<13} {'partition':<16} {'rows read':>9}")
     for step in steps:
         print(f"{step.level:>5}  {step.job:<13} {step.partition:<16} {step.reads:>9}")
@@ -102,13 +116,23 @@ def main() -> None:
     lineage.add_argument("--bad-day", type=date.fromisoformat, required=True, help="the raw day that was wrong")
     lineage.set_defaults(run=_lineage)
     backfill = concepts.add_parser("backfill", parents=[lake], help="plan and run the rebuild of bad days' outputs")
-    backfill.add_argument("--bad-day", type=date.fromisoformat, action="append", required=True,
-                          help="a raw day that was wrong, repeatable")
+    which = backfill.add_mutually_exclusive_group(required=True)
+    which.add_argument("--bad-day", type=date.fromisoformat, action="append",
+                       help="a raw day that was wrong, repeatable")
+    which.add_argument("--stale", action="store_true",
+                       help="every day whose raw files changed since its output read them")
     backfill.add_argument("--dry-run", action="store_true", help="show the plan and its cost, rebuild nothing")
     backfill.add_argument("--parallel", type=_at_least(1), default=2, help="most steps at once (default 2)")
     backfill.add_argument("--step-ms", type=_at_least(0), default=0,
                           help="make each step take this much longer, to watch the throttle (default 0)")
     backfill.set_defaults(run=_backfill)
+    late = concepts.add_parser("late", parents=[lake], help="late and corrected orders arrive for an old day")
+    late.add_argument("--day", type=date.fromisoformat, required=True, help="the day they belong to")
+    late.add_argument("--late", type=_at_least(0), default=5, help="new orders that arrived late (default 5)")
+    late.add_argument("--corrections", type=_at_least(0), default=3,
+                      help="existing orders with a new amount (default 3)")
+    late.add_argument("--seed", type=int, default=0, help="the same seed gives the same arrivals (default 0)")
+    late.set_defaults(run=_late)
     args = parser.parse_args()
     if args.concept is None:
         parser.print_help()
