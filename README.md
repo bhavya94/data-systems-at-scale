@@ -228,16 +228,63 @@ nothing to backfill: every output read the raw files as they are now
 - The plan's cost counts the late file too: 208 rows, not the 200 the old output read.
 - Run it again, and nothing is stale.
 
+## Deletes that reach every copy
+
+A customer asks to be forgotten. Their orders sit in raw files, and their id sits in `customer_sales`, a weekly
+table of orders per customer that `dsas weekly` now builds too. Their amounts also sit inside every sales total.
+
+```console
+$ uv run dsas delete --customer c-17 2>&1 | grep -vE "wrote [0-9]+ bytes|lineage:|rebuilding [a-z]+_sales|adding up|read [0-9]+ raw orders|customer_sales [0-9W-]+: [0-9]+ orders|output is|stale: .*date=2026-10-0[2-7]"
+
+c-17 appears in 9 files:
+  out/customer_sales/week=2026-W40/data.jsonl
+  out/customer_sales/week=2026-W41/data.jsonl
+  raw/orders/date=2026-10-01/part-0.jsonl
+  raw/orders/date=2026-10-02/part-0.jsonl
+  raw/orders/date=2026-10-03/part-0.jsonl
+  raw/orders/date=2026-10-04/part-0.jsonl
+  raw/orders/date=2026-10-05/part-0.jsonl
+  raw/orders/date=2026-10-06/part-0.jsonl
+  raw/orders/date=2026-10-07/part-0.jsonl
+
+   53.9ms  MainThread  erased 5 orders of c-17 from raw/orders/date=2026-10-01/part-0.jsonl; 195 remain
+   55.9ms  MainThread  erased 7 orders of c-17 from raw/orders/date=2026-10-02/part-0.jsonl; 193 remain
+   59.1ms  MainThread  erased 6 orders of c-17 from raw/orders/date=2026-10-03/part-0.jsonl; 194 remain
+   60.0ms  MainThread  erased 4 orders of c-17 from raw/orders/date=2026-10-04/part-0.jsonl; 196 remain
+   61.4ms  MainThread  erased 7 orders of c-17 from raw/orders/date=2026-10-05/part-0.jsonl; 193 remain
+   62.6ms  MainThread  erased 7 orders of c-17 from raw/orders/date=2026-10-06/part-0.jsonl; 193 remain
+   65.0ms  MainThread  erased 5 orders of c-17 from raw/orders/date=2026-10-07/part-0.jsonl; 195 remain
+
+erased 41 orders from 7 raw files; rebuilding what they reached
+
+   67.4ms  MainThread  stale: out/daily_sales/date=2026-10-01/data.jsonl: a raw file it read has different bytes now
+  112.0ms  MainThread  level 1 done: rebuilt 9, so the next level can read them
+  113.8ms  MainThread  level 2 done: rebuilt 2, so the next level can read them
+
+c-17 now appears in 0 files
+```
+
+1. Find: c-17 appears in 7 raw files and both weeks of `customer_sales`.
+2. Rewrite raw: this is the one exception to "raw is written once". Each raw file that holds the customer is
+   rewritten without them, in one step: a temp file, then a rename.
+3. Rebuild: the rewritten files have new fingerprints, so every day is stale. The stale backfill rebuilds the
+   days, the weeks and `customer_sales`. The grep above keeps one stale line of the seven.
+4. Verify: a scan of every file in the lake finds the id nowhere. It searches for `"c-17"` with its quotes, so
+   it would not match `c-170`.
+
+Each total drops by exactly the deleted orders, and files without the customer keep their bytes.
+
 ## Layout
 
 ```
 src/data_systems_at_scale/
-  cli.py        the dsas command: raw, daily, weekly, lineage, backfill and late
+  cli.py        the dsas command: raw, daily, weekly, lineage, backfill, late and delete
   pipelines/    jobs that turn raw data into outputs, and how to fix the outputs
     raw.py      seeded raw orders, one folder per day, written once; late arrivals
-    jobs.py     daily and weekly sales per store
+    jobs.py     daily and weekly sales per store, and weekly sales per customer
     lineage.py  each output's inputs; everything a bad input reached
-    backfill.py plan and run a rebuild: scope, order, cost and throttle
+    backfill.py plan and run a rebuild: scope, order, cost and throttle; stale days
+    deletes.py  remove one customer from raw data and everything built from it
     storage.py  write a temp file, then rename it over the output
 tests/          one behavior test per concept
 ```

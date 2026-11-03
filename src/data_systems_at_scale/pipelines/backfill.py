@@ -18,9 +18,9 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from data_systems_at_scale.pipelines.jobs import daily_sales, weekly_sales
+from data_systems_at_scale.pipelines.jobs import inputs, rebuild
 from data_systems_at_scale.pipelines.lineage import downstream, manifests
-from data_systems_at_scale.pipelines.raw import day_folder, read_day
+from data_systems_at_scale.pipelines.raw import day_folder
 from data_systems_at_scale.pipelines.storage import fingerprint
 
 log = logging.getLogger(__name__)
@@ -60,14 +60,11 @@ def plan(root: Path, bad_days: list[date]) -> list[Step]:
     for depth, path in downstream(root, starts):
         if depth:  # depth 0 is the raw file itself
             level[path] = max(depth, level.get(path, 0))  # reached twice: it must wait for the deeper path
-    inputs = {entry["output"]: entry["inputs"] for entry in manifests(root)}
     steps = []
     for path, depth in level.items():
         _, job, partition, _ = path.split("/")
-        if job == "daily_sales":  # it will read the day's raw files as they are now, late files included
-            reads = len(read_day(root, date.fromisoformat(partition.removeprefix("date="))))
-        else:
-            reads = sum(len((root / source["path"]).read_text().splitlines()) for source in inputs[path])
+        # the files the step will read as they are now, late files included
+        reads = sum(len(source.read_text().splitlines()) for source in inputs(root, job, partition))
         steps.append(Step(depth, job, partition, reads))
     return sorted(steps, key=lambda step: (step.level, step.job, step.partition))
 
@@ -84,7 +81,7 @@ def run(root: Path, steps: list[Step], parallel: int, step_ms: int = 0) -> tuple
     and the most steps that ran at once."""
     running, peak, lock, done = 0, 0, threading.Lock(), []
 
-    def rebuild(step: Step) -> Done:
+    def rebuild_step(step: Step) -> Done:
         nonlocal running, peak
         with lock:  # the counter is shared by every backfill thread
             running += 1
@@ -92,10 +89,7 @@ def run(root: Path, steps: list[Step], parallel: int, step_ms: int = 0) -> tuple
             log.info("rebuilding %s %s (%d running, limit %d)", step.job, step.partition, running, parallel)
         start = time.time()
         time.sleep(step_ms / 1000)  # stands in for a job over a real day of data
-        if step.job == "daily_sales":
-            daily_sales(root, date.fromisoformat(step.partition.removeprefix("date=")))
-        else:
-            weekly_sales(root, step.partition.removeprefix("week="))
+        rebuild(root, step.job, step.partition)
         with lock:
             running -= 1
         return Done(step, start, time.time())
@@ -103,6 +97,6 @@ def run(root: Path, steps: list[Step], parallel: int, step_ms: int = 0) -> tuple
     for level in sorted({step.level for step in steps}):
         batch = [step for step in steps if step.level == level]
         with ThreadPoolExecutor(max_workers=parallel, thread_name_prefix="backfill") as pool:
-            done += list(pool.map(rebuild, batch))
+            done += list(pool.map(rebuild_step, batch))
         log.info("level %d done: rebuilt %d, so the next level can read them", level, len(batch))
     return done, peak
