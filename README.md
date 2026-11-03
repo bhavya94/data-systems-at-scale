@@ -274,6 +274,69 @@ c-17 now appears in 0 files
 
 Each total drops by exactly the deleted orders, and files without the customer keep their bytes.
 
+## Verify, then swap
+
+A backfill in place lets readers see a half-fixed table: some days rebuilt, some not yet, and a week that
+doesn't match its days. `--staged` avoids that. `lake/out` becomes a link to a version folder, `out-v1`, and
+readers always go through the link.
+
+1. Stage: copy the live version to the next folder, and rebuild there. Readers keep reading the live version.
+2. Verify: each rebuilt output must add up to its inputs. Every output outside the plan must keep its old bytes.
+3. Swap: point the link at the new version in one rename. If a check fails, nothing is swapped.
+
+First with `--inject-bug`, which makes one staged output a cent off, as a bug in the rebuild would:
+
+```console
+$ uv run dsas late --day 2026-10-03 >/dev/null 2>&1
+$ uv run dsas backfill --stale --staged --inject-bug 2>&1 | grep -vE "wrote [0-9]+ bytes|lineage:|rebuilding [a-z]+_sales|adding up|read [0-9]+ raw orders|correct earlier|customer_sales [0-9W-]+: [0-9]+ orders|output is"
+    9.5ms  MainThread  stale: out/daily_sales/date=2026-10-03/data.jsonl: the folder now holds 2 raw files, and it read 1
+
+days to backfill: 2026-10-03
+   10.0ms  MainThread  out is now a link to out-v1
+   15.5ms  MainThread  staged out-v2 as a copy of out-v1; readers still read out-v1
+   20.8ms  MainThread  level 1 done: rebuilt 2, so the next level can read them
+   22.0ms  MainThread  level 2 done: rebuilt 1, so the next level can read them
+   24.0ms  MainThread  check: daily_sales date=2026-10-03 adds up to its inputs: 205 orders, 1984377 cents
+   24.2ms  MainThread  check: weekly_sales week=2026-W40 adds up to its inputs: 805 orders, 8070415 cents
+   24.9ms  MainThread  check: every output outside the plan has its old bytes
+
+not swapped. Failed checks: 1
+  customer_sales week=2026-W40: 805 orders, 8070416 cents; its inputs say 805 orders, 8070415 cents
+out still points to out-v1; out-v2 stays in staging-out-v2 to inspect
+```
+
+Then for real:
+
+```console
+$ uv run dsas backfill --stale --staged 2>&1 | grep -vE "wrote [0-9]+ bytes|lineage:|rebuilding [a-z]+_sales|adding up|read [0-9]+ raw orders|correct earlier|customer_sales [0-9W-]+: [0-9]+ orders|output is"
+    9.7ms  MainThread  stale: out/daily_sales/date=2026-10-03/data.jsonl: the folder now holds 2 raw files, and it read 1
+
+days to backfill: 2026-10-03
+   15.2ms  MainThread  staged out-v3 as a copy of out-v1; readers still read out-v1
+   20.0ms  MainThread  level 1 done: rebuilt 2, so the next level can read them
+   21.0ms  MainThread  level 2 done: rebuilt 1, so the next level can read them
+   22.3ms  MainThread  check: customer_sales week=2026-W40 adds up to its inputs: 805 orders, 8070415 cents
+   22.7ms  MainThread  check: daily_sales date=2026-10-03 adds up to its inputs: 205 orders, 1984377 cents
+   22.9ms  MainThread  check: weekly_sales week=2026-W40 adds up to its inputs: 805 orders, 8070415 cents
+   23.5ms  MainThread  check: every output outside the plan has its old bytes
+   23.7ms  MainThread  swapped: out now points to out-v3
+
+all checks passed; out now points to out-v3. To go back, point it at the previous version.
+
+$ ls -l lake
+out -> out-v3
+out-v1  
+out-v2  
+out-v3  
+staging-out-v2  
+```
+
+- The failed version stays in `out-v2` and `staging-out-v2`, so you can inspect it. The live link never moved.
+- The good version is `out-v3`, and the swap made it live in one rename: a new link beside the old one, renamed
+  over it.
+- `out-v1` stays on disk, so going back is the same one-step swap, to `out-v1`.
+- Old versions are copies too: a delete must reach them as well, or they must expire.
+
 ## Layout
 
 ```
@@ -285,6 +348,7 @@ src/data_systems_at_scale/
     lineage.py  each output's inputs; everything a bad input reached
     backfill.py plan and run a rebuild: scope, order, cost and throttle; stale days
     deletes.py  remove one customer from raw data and everything built from it
+    versions.py stage a new version of the outputs, verify it, then swap it live
     storage.py  write a temp file, then rename it over the output
 tests/          one behavior test per concept
 ```
